@@ -6,6 +6,7 @@
   .\find_ip.ps1                               # scan the current subnet
   .\find_ip.ps1 -Subnet 192.168.1.0/24        # scan a specific subnet
   .\find_ip.ps1 -Mac AA-BB-CC-DD-EE-FF        # find IP by MAC (full or partial)
+  .\find_ip.ps1 -Vendor apple                 # filter by manufacturer/brand
   .\find_ip.ps1 -Name laptop                  # search by hostname
   .\find_ip.ps1 -Csv result.csv               # export to CSV
   .\find_ip.ps1 -NoResolve                    # skip hostname lookup (faster)
@@ -14,12 +15,45 @@ param(
     [string]$Subnet,
     [string]$Mac,
     [string]$Name,
+    [string]$Vendor,
     [string]$Csv,
     [int]$Timeout = 800,
     [switch]$NoResolve
 )
 
+$ouiMap = @{
+    '7864A0' = 'Cisco'; '1C1D86' = 'Cisco'; '00000C' = 'Cisco'; '68BDAB' = 'Cisco'
+    '000393' = 'Apple'; '000502' = 'Apple'; '70EE50' = 'Apple'; 'D0880C' = 'Apple'; 'B8E856' = 'Apple'; 'ACBC32' = 'Apple'
+    '10F60A' = 'Intel'; '7CB566' = 'Intel'; '58961D' = 'Intel'; '28D0EA' = 'Intel'; 'ECED04' = 'Intel'; '0002B3' = 'Intel'
+    '083A2F' = 'Espressif'; '240AC4' = 'Espressif'; '30AEA4' = 'Espressif'; '84CCA8' = 'Espressif'; 'EC6260' = 'Espressif'
+    'B827EB' = 'Raspberry Pi'; 'DCA632' = 'Raspberry Pi'; 'E45F01' = 'Raspberry Pi'; '28CDC1' = 'Raspberry Pi'
+    '50C7BF' = 'TP-Link'; '000AEB' = 'TP-Link'; '1C3BF3' = 'TP-Link'; '704F57' = 'TP-Link'
+    '00156D' = 'Ubiquiti'; '24A43C' = 'Ubiquiti'; '788A20' = 'Ubiquiti'; 'AC8BA9' = 'Ubiquiti'
+    '000C42' = 'MikroTik'; '488F5A' = 'MikroTik'; '6C3B6B' = 'MikroTik'
+    '54833A' = 'Zyxel'; '0002CF' = 'Zyxel'; '107B44' = 'Zyxel'
+    '0000F0' = 'Samsung'; '0007AB' = 'Samsung'; '0808C2' = 'Samsung'; '34C059' = 'Samsung'
+    '009EC8' = 'Xiaomi'; '18F0E4' = 'Xiaomi'; '286C07' = 'Xiaomi'; '7C49EB' = 'Xiaomi'
+    '001882' = 'Huawei'; '001E10' = 'Huawei'; '0425C5' = 'Huawei'
+    '001A11' = 'Google'; '3C5A37' = 'Google'; '546009' = 'Google'
+    '00065B' = 'Dell'; '180373' = 'Dell'; '24B6FD' = 'Dell'
+    '0001E6' = 'HP'; '000802' = 'HP'; '28924A' = 'HP'
+}
 
+function Get-MacVendor([string]$m) {
+    if (-not $m -or $m -eq '(this host)') { return '(this host)' }
+    $clean = ($m -replace '[^0-9a-fA-F]', '').ToUpper()
+    if ($clean.Length -lt 6) { return '' }
+    $b1 = [Convert]::ToByte($clean.Substring(0, 2), 16)
+    $isRandom = ($b1 -band 0x02) -ne 0
+    $oui = $clean.Substring(0, 6)
+    $v = $ouiMap[$oui]
+    if ($v) {
+        if ($isRandom) { return "$v (Private MAC)" }
+        return $v
+    }
+    if ($isRandom) { return 'Private / Random MAC' }
+    return 'Unknown'
+}
 
 function ConvertTo-UInt32([string]$ip) {
     $b = ([System.Net.IPAddress]::Parse($ip)).GetAddressBytes()
@@ -48,7 +82,6 @@ $mask  = [uint32]([uint64]0xFFFFFFFF -shl (32 - $prefix) -band 0xFFFFFFFF)
 $net   = (ConvertTo-UInt32 $base) -band $mask
 $bcast = $net -bor (-bnot $mask -band 0xFFFFFFFF)
 $first = [uint32]($net + 1); $last = [uint32]($bcast - 1)
-# for-loop instead of $first..$last: the PS 5.1 range operator only supports Int32
 $targets = for ([uint32]$i = $first; $i -le $last; $i++) { ConvertTo-IP $i }
 
 Write-Host "[*] This host: $myIP   Scanning: $(ConvertTo-IP $net)/$prefix ($($targets.Count) hosts) ..." -ForegroundColor Cyan
@@ -90,12 +123,15 @@ $macQ = if ($Mac) { ($Mac -replace '[^0-9a-fA-F]', '').ToLower() } else { '' }
 
 $rows = foreach ($ip in $found) {
     $m = if ($arp[$ip]) { $arp[$ip] } elseif ($ip -eq $myIP) { '(this host)' } else { '' }
+    $v = Get-MacVendor $m
     $h = [string]$names[$ip]
     if ($macQ -and ($m -replace ':', '') -notlike "*$macQ*") { continue }
     if ($Name -and $h -notlike "*$Name*") { continue }
+    if ($Vendor -and $v -notlike "*$Vendor*") { continue }
     [PSCustomObject]@{
         IP       = $ip
         MAC      = $m
+        Vendor   = $v
         Ping     = if ($alive[$ip]) { 'yes' } else { 'no (ARP only)' }
         Hostname = $h
     }
@@ -108,4 +144,4 @@ if ($Csv) {
     $rows | Export-Csv -Path $Csv -NoTypeInformation -Encoding UTF8
     Write-Host "Saved: $Csv"
 }
-if (($Mac -or $Name) -and -not $rows) { exit 1 }
+if (($Mac -or $Name -or $Vendor) -and -not $rows) { exit 1 }
